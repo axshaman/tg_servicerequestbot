@@ -1,0 +1,161 @@
+openapi: 3.0.3
+info:
+  title: IST-detector Service Request API
+  version: 1.0.0
+  description: |
+    Reference API describing how the Telegram bot orchestrates service requests.
+    The API can be reused by alternative clients or for integration testing.
+servers:
+  - url: https://example.com/api
+paths:
+  /service-requests:
+    post:
+      summary: Create a new service request
+      description: |
+        Accepts the data collected during the Telegram conversation and returns a
+        payment link that the client can follow to complete the purchase.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceRequestPayload'
+      responses:
+        '201':
+          description: Service request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /service-requests/{requestId}:
+    get:
+      summary: Retrieve a service request status
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service request found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequestStatus'
+        '404':
+          description: Request not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    ServiceRequestPayload:
+      type: object
+      required:
+        - telegramId
+        - socialNetwork
+        - serviceCode
+        - link
+        - phone
+        - price
+      properties:
+        telegramId:
+          type: integer
+          format: int64
+          description: Telegram identifier of the client.
+        username:
+          type: string
+          description: Display name of the client.
+        socialNetwork:
+          type: string
+          description: Selected social network or object under investigation.
+          example: "Вконтакте"
+        serviceCode:
+          type: string
+          description: Identifier of the requested service.
+          enum:
+            - intrusion_check
+            - security_risk
+            - leak_analysis
+            - monitoring
+            - investigation
+        subscriptionPlan:
+          type: string
+          description: Optional monitoring tariff.
+          enum:
+            - monthly
+            - weekly
+            - daily
+        link:
+          type: string
+          description: URL, ID or username of the analysed account.
+        phone:
+          type: string
+          description: Contact phone number.
+          example: "+79991112233"
+        email:
+          type: string
+          format: email
+          description: Optional contact e-mail.
+        comment:
+          type: string
+          description: Additional details supplied by the client.
+        price:
+          type: number
+          format: float
+          description: Calculated service price in RUB.
+    ServiceRequestResponse:
+      type: object
+      required:
+        - id
+        - paymentLink
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier of the request.
+        status:
+          type: string
+          enum: [pending_payment, paid, cancelled]
+          description: Current processing status.
+        paymentLink:
+          type: string
+          format: uri
+          description: Robokassa payment link generated for the request.
+    ServiceRequestStatus:
+      type: object
+      required:
+        - id
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending_payment, paid, cancelled, in_progress, completed]
+        updatedAt:
+          type: string
+          format: date-time
+        operatorComment:
+          type: string
+          description: Notes added by the operations team.
+    ErrorResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

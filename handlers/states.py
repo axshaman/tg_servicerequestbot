@@ -1,14 +1,12 @@
-from aiogram.dispatcher.filters.state import StatesGroup, State
+from aiogram.dispatcher.filters.state import State, StatesGroup
 
 
 class AuthState(StatesGroup):
     social_net = State()
     service = State()
     link = State()
-    price = State()
+    plan = State()
     phone = State()
-    payment = State()
-
-
-
-
+    email = State()
+    comment = State()
+    confirmation = State()

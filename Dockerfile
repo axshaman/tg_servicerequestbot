@@ -1,8 +1,9 @@
-FROM python:3.9
+FROM python:3.11-slim
 
-WORKDIR /src
-COPY req.txt /src
-RUN pip install -r req.txt
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . /src
+COPY . .
 
+CMD ["python", "main.py"]

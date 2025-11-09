@@ -1,233 +1,364 @@
+"""Conversation handlers for the service request bot."""
+import logging
+import re
+from email.message import EmailMessage
+from typing import Optional
+from urllib.parse import quote
+
 from aiogram import types
 from aiogram.dispatcher import FSMContext
-from aiogram.types import CallbackQuery
-from loader import dp, bot
-from .states import AuthState
-from aiogram.dispatcher.filters import Command
-from keyboards.choise_buttons import choise, choise2, accoun, choise3, button_3000, button_300, button_30000, button_change
+from aiogram.dispatcher.filters import Command, Text
+from aiogram.types import CallbackQuery, InputFile, ReplyKeyboardRemove
 from asgiref.sync import sync_to_async
-import hashlib
-from urllib.parse import quote
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from config import EMAIL_PASSWORD, HOST, EMAIL_FROM, EMAIL_TO_1, EMAIL_TO_2, EMAIL_TO_3, EMAIL_TO_4
-import re
+
+from config import settings
+from handlers.states import AuthState
+from keyboards.choise_buttons import (
+    build_confirmation_keyboard,
+    build_contract_keyboard,
+    build_payment_keyboard,
+    build_plan_keyboard,
+    build_skip_keyboard,
+    get_service_keyboard,
+    get_social_network_keyboard,
+)
+from loader import bot, dp
+from service_catalog import SERVICE_OPTIONS, ServiceOption, SubscriptionPlan, resolve_service_option, resolve_social_network
+
+logger = logging.getLogger(__name__)
+
+PHONE_SANITIZE_PATTERN = re.compile(r"[\s()-]")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+SKIP_WORDS = {"пропустить", "skip", "no", "нет"}
 
 
-def get_description(price, service, net):
-    if price == 30000:
-        price = '30 000'
-    description = f'Оплата {price}руб за оказание услуги: "{service}", объект для проверки: {net} '
-    result = quote(description, safe='/')
-    return result
+def format_price(price: int) -> str:
+    return f"{price:,}".replace(",", " ")
 
 
-def make_hash(price, phone, telegram_id):
-    hash_obj = hashlib.md5(f"infsectest_ru:{price}:0:qNI1cl89rPWbFMkb9Ls0:Shp_phone={phone}:Shp_telegram={telegram_id}".encode())
-    return hash_obj.hexdigest()
+def get_service_by_code(code: str) -> ServiceOption:
+    for option in SERVICE_OPTIONS:
+        if option.code == code:
+            return option
+    raise ValueError(f"Unknown service code: {code}")
+
+
+def get_plan_by_code(service: ServiceOption, plan_code: str) -> Optional[SubscriptionPlan]:
+    for plan in service.subscription_plans:
+        if plan.code == plan_code:
+            return plan
+    return None
+
+
+def get_description(price: int, service: str, target: str) -> str:
+    raw_description = settings.payment_description_template.format(
+        price=format_price(price), service=service, target=target
+    )
+    return quote(raw_description, safe="/")
+
+
+def make_hash(price: int, phone: str, telegram_id: int) -> str:
+    payload = (
+        f"{settings.robokassa_merchant_login}:{price}:0:{settings.robokassa_password1}:"
+        f"Shp_phone={phone}:Shp_telegram={telegram_id}"
+    )
+    import hashlib
+
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 
 @sync_to_async
-def post_data_to_email(data, HOST=HOST, FROM=EMAIL_FROM, TO=[EMAIL_TO_1, EMAIL_TO_2, EMAIL_TO_3, EMAIL_TO_4], PASSWORD=EMAIL_PASSWORD):
-    try:
-        phone=data['phone']
-        telegram_id=data['telegram_id']
-        service=data['service']
-        social_net=data['social_net']
-        link=data['link']
-        final_price = data['price']
-    except KeyError as ke:
-        return ke
-    SUBJECT = f"Заказ\nУслуга: {service}\nСоциальная сеть:{social_net}, ссылка: {link}\nТелефон: {phone}\nЦена: {final_price}\ntelegram_id: {telegram_id}"
+def make_link(data: dict) -> str:
+    phone = data["phone"]
+    telegram_id = data["telegram_id"]
+    service = data["service"]
+    social_net = data["social_net"]
+    link = data["link"]
+    plan = data.get("subscription_plan")
+    price = data["price"]
+    target = f"{social_net}: {link}"
+    if plan:
+        target = f"{target} ({plan})"
+    md5 = make_hash(price, phone, telegram_id)
+    description = get_description(price, service, target)
+    return (
+        f"{settings.robokassa_base_url}?MerchantLogin={settings.robokassa_merchant_login}&InvId=0&Culture=ru&Encoding=utf-8"
+        f"&Shp_phone={phone}&Shp_telegram={telegram_id}&OutSum={price}&Description={description}&SignatureValue={md5}"
+    )
+
+
+@sync_to_async
+def post_data_to_email(data: dict) -> bool:
+    recipients = settings.email_recipients
+    if not recipients:
+        logger.warning("No email recipients configured; skipping notification.")
+        return False
+
+    message_lines = [
+        "Получена новая заявка из Telegram-бота IST-detector.",
+        "",
+        f"Пользователь: {data.get('username', '—')}",
+        f"Telegram ID: {data.get('telegram_id')}",
+        f"Социальная сеть/объект: {data.get('social_net')}",
+        f"Ссылка или идентификатор: {data.get('link')}",
+        f"Услуга: {data.get('service')}",
+        f"Стоимость: {format_price(data.get('price'))} руб.",
+    ]
+    if data.get("subscription_plan"):
+        message_lines.append(f"Тариф: {data['subscription_plan']}")
+    message_lines.append(f"Телефон: {data.get('phone')}")
+    if data.get("email"):
+        message_lines.append(f"Email: {data['email']}")
+    if data.get("comment"):
+        message_lines.append("Комментарий:")
+        message_lines.append(data["comment"])
+    if data.get("payment_link"):
+        message_lines.extend(["", f"Ссылка для оплаты: {data['payment_link']}"])
+    body = "\n".join(message_lines)
+
+    email_message = EmailMessage()
+    email_message["Subject"] = "Новая заявка из Telegram-бота IST-detector"
+    email_message["From"] = settings.email_from
+    email_message.set_content(body)
+
     import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = "Заказ"
-    msg['From'] = FROM
-    for mail in TO:
-        msg['To'] = mail
-        body = MIMEText(SUBJECT)
-        msg.attach(body)
-        username = FROM
-        PASSWORD = PASSWORD
-        try:
-            try:
-                server = smtplib.SMTP_SSL(HOST)
-            except:
-                return 990
-            try:
-                server.login(username, PASSWORD)
-            except:
-                return 998
-            try:
-                server.sendmail(FROM, mail, msg.as_string())
-            except:
-                return 100000
-            server.quit()
-        except Exception:
-            return 400
+
+    try:
+        with smtplib.SMTP_SSL(settings.email_host) as server:
+            server.login(settings.email_from, settings.email_password)
+            for recipient in recipients:
+                email_message["To"] = recipient
+                server.send_message(email_message)
+                del email_message["To"]
+    except Exception as exc:  # pragma: no cover - network errors are environment specific
+        logger.exception("Failed to send notification email: %s", exc)
+        return False
     return True
 
 
-@sync_to_async
-def make_link(data):
-    phone=data['phone']
-    net = data['social_net']
-    telegram_id=data['telegram_id']
-    service=data['service']
-    final_price = data['price']
-    md5 = make_hash(final_price, phone, telegram_id)
-    description = get_description(final_price, service, net)
-    link_to_pay = f"https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=infsectest_ru&InvId=0&Culture=ru&Encoding=utf-8&Shp_phone={phone}&Shp_telegram={telegram_id}&OutSum={final_price}&Description={description}&SignatureValue={md5}"
-    return link_to_pay
-
-
-permitted = [
-    'анализ рисков безопасности', 'узнать, пытались ли взломать', 'мониторинг', 'расследование', 'анализ утечек'
-    ]
-
-nets = ['вконтакте', 'instagram', 'facebook', 'email', 'web-сайты и cms системы',]
-
-dic = {}
-
-
-@dp.message_handler(Command('start'))
-async def answer(message: types.Message):
+@dp.message_handler(Command("start"))
+async def answer(message: types.Message, state: FSMContext):
+    await state.finish()
     username = message.from_user.full_name
     telegram_id = message.from_user.id
     await AuthState.social_net.set()
-    image = InputFile(path_or_bytesio='handlers/images/im.png')
-    text = f'Здравствуйте, {username} 👋\n\n 📱 IST-detector может помочь решить Вам большинство вопросов в сфере защиты данных, также я могу провести тестирование Ваших аккаунтов на возможность взлома'
-    await bot.send_photo(telegram_id, image, caption=text)
-    await message.answer('С какой из систем будем работать?', reply_markup=choise2)
+    image = InputFile(path_or_bytesio="handlers/images/im.png")
+    greeting = (
+        f"Здравствуйте, {username} 👋\n\n"
+        "📱 IST-detector поможет решить вопросы в сфере защиты данных. "
+        "Я могу провести тестирование Ваших аккаунтов на возможность взлома."
+    )
+    await bot.send_photo(telegram_id, image, caption=greeting)
+    await message.answer(
+        "С какой из систем будем работать?",
+        reply_markup=get_social_network_keyboard(),
+    )
+
+
+@dp.message_handler(Command("help"), state="*")
+async def help_command(message: types.Message):
+    await message.answer(
+        "Я помогу оформить заявку на проверку безопасности аккаунтов. "
+        "Используйте /start, чтобы начать заново, /services, чтобы увидеть список услуг, и /cancel, чтобы прервать диалог."
+    )
+
+
+@dp.message_handler(Command("services"), state="*")
+async def services_command(message: types.Message):
+    services = "\n".join(f"• {option.label}" for option in SERVICE_OPTIONS)
+    await message.answer(
+        "Доступные услуги:\n" + services,
+        reply_markup=get_service_keyboard(),
+    )
+
+
+@dp.message_handler(Command("cancel"), state="*")
+async def cancel_command(message: types.Message, state: FSMContext):
+    await state.finish()
+    await message.answer("Диалог прерван. Чтобы начать заново, используйте /start.", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message_handler(state=AuthState.social_net)
 async def get_social(message: types.Message, state: FSMContext):
-    social_net = message.text
-    if not social_net.lower() in nets:
-        await message.answer('Выберите тестируемый объект из предложенных')
+    social_net = resolve_social_network(message.text)
+    if not social_net:
+        await message.answer("Выберите объект из предложенных в клавиатуре.")
         return
-    await state.update_data(social_net=social_net)
-    if social_net.lower() == 'web-сайты и cms системы':
-        await message.answer('Проверьте свой сайт на попытки взлома 🔓\n\n '\
-                        'Узнайте, кто хотел получить доступ к Вашим сообщениям, фотографиям и спискам друзей 🔎\n\n Получите исчерпывающую информацию 📂 о рисках утечки данных, об общих рисках для безопасности данных и включите мониторинг ИБ, чтобы мы могли предупреждать ⚠️  Вас обо всех инцидентах, фиксируемых нашим центром информационной безопасности.', reply_markup=choise)
-    else:
-        await message.answer(f'Проверьте свой аккаунт {social_net} на попытки взлома 🔓\n\n '\
-                        'Узнайте, кто хотел получить доступ к Вашим сообщениям, фотографиям и спискам друзей 🔎\n\n Получите исчерпывающую информацию 📂 о рисках утечки данных, об общих рисках для безопасности данных и включите мониторинг ИБ, чтобы мы могли предупреждать ⚠️  Вас обо всех инцидентах, фиксируемых нашим центром информационной безопасности.', reply_markup=choise)
+    await state.update_data(social_net=social_net.label)
     await AuthState.next()
+    default_text = (
+        f"Проверьте свой аккаунт {social_net.label} на попытки взлома 🔓\n\n"
+        "Узнайте, кто хотел получить доступ к Вашим сообщениям, фотографиям и спискам друзей 🔎\n\n"
+        "Получите информацию о рисках утечки данных и включите мониторинг, чтобы мы могли предупреждать Вас об инцидентах."
+    )
+    if social_net.code.startswith("web"):
+        default_text = (
+            "Проверьте свой сайт на попытки взлома 🔓\n\n"
+            "Получите исчерпывающую информацию о рисках утечки данных и настройте мониторинг безопасности."
+        )
+    await message.answer(default_text, reply_markup=get_service_keyboard())
 
 
 @dp.message_handler(state=AuthState.service)
 async def get_service(message: types.Message, state: FSMContext):
-    service = message.text
-    if not service.lower() in permitted:
-        await message.answer('Выберите услугу из предложенных')
+    service = resolve_service_option(message.text)
+    if not service:
+        await message.answer("Выберите услугу из предложенных в клавиатуре.")
         return
-    await state.update_data(service=service)
-    await message.answer('Укажите Ваш аккаунт (ссылку на него, id, логин) 👤', reply_markup=types.ReplyKeyboardRemove())
+    await state.update_data(service=service.label, service_code=service.code)
+    await message.answer(service.description, reply_markup=ReplyKeyboardRemove())
+    await message.answer(
+        "Укажите Ваш аккаунт (ссылку на него, ID, логин) 👤",
+    )
     await AuthState.next()
 
 
 @dp.message_handler(state=AuthState.link)
 async def get_link(message: types.Message, state: FSMContext):
-    link = message.text
+    link = message.text.strip()
     await state.update_data(link=link)
     data = await state.get_data()
-    telegram_id = int(message.from_user.id)
-    dic.setdefault(telegram_id, data)
-    service = data['service']
-    await state.finish()
-    if service.lower() == 'узнать, пытались ли взломать':
-        await message.answer('Я помогу узнать, заказывали ли взлом Вашего аккаунта в Darknet или у профессиональных хакеров 🖥. Предоставлю Вам информацию по целевым атакам, их датам и успешности')
-        await AuthState.price.set()
-        await state.update_data(price=3000)
-        await AuthState.next()
-        await message.answer('Оплата осуществляется через авторизованный сервис Робокасса, являющийся одним из ведущих в РФ, что гарантирует безопасность платежей ⚒')
-        await message.answer('Введите номер телефона ☎️ привязанный к выбранному аккаунту.')
+    service = get_service_by_code(data["service_code"])
+    if service.requires_plan():
+        await AuthState.plan.set()
+        await message.answer(
+            "Выберите периодичность мониторинга:",
+            reply_markup=build_plan_keyboard(service.subscription_plans),
+        )
+    else:
+        await prepare_for_phone(message, state, service, service.price)
 
 
-    elif service.lower() == 'анализ рисков безопасности':
-        await message.answer('Будет произведен анализ Вашего аккаунта на возможные риски несанкционированного доступа 🗝')
-        await AuthState.price.set()
-        await state.update_data(price=300)
-        await AuthState.next()
-        await message.answer('Оплата осуществляется через авторизованный сервис Робокасса, являющийся одним из ведущих в РФ, что гарантирует безопасность платежей ⚒')
-        await message.answer('Введите номер телефона ☎️ привязанный к выбранному аккаунту')
+async def prepare_for_phone(
+    message: types.Message, state: FSMContext, service: ServiceOption, price: int, plan: Optional[SubscriptionPlan] = None
+) -> None:
+    await state.update_data(price=price)
+    if plan:
+        await state.update_data(subscription_plan=plan.label)
+        await message.answer(f"Выбран тариф: {plan.label}\n{plan.description}")
+    else:
+        await state.update_data(subscription_plan=None)
+    await message.answer(f"Стоимость услуги: {format_price(price)} руб.")
+    await message.answer(service.payment_hint)
+    await message.answer(service.phone_prompt, reply_markup=ReplyKeyboardRemove())
+    await AuthState.phone.set()
 
 
-    elif service.lower() == 'анализ утечек':
-        await message.answer('Проверьте взламывали ли Ваш аккаунт и есть ли риск утечки данных')
-        await AuthState.price.set()
-        await state.update_data(price=300)
-        await AuthState.next()
-        await message.answer('Оплата осуществляется через авторизованный сервис Робокасса, являющийся одним из ведущих в РФ, что гарантирует безопасность платежей ⚒')  
-        await message.answer('Введите номер телефона ☎️ привязанный к выбранному аккаунту')
-
-
-    elif service.lower() == 'мониторинг':
-        await message.answer(text='Укажите периодичность мониторинга информационной безопасности Вашего аккаунта и оплатите услугу. Отчеты будут предоставляться на Ваш Telegram в формате Secret Chat. Первый отчет через 2 дня после заказа 👇', reply_markup=button_change)
-
-    elif service.lower() == 'расследование':
-        await message.answer('Если у Вас произошел инцидент несанкционированного доступа 🕷 в аккаунт. Мы можем помочь найти злоумышленника. Гарантируем предоставить расширенные сведения об инциденте, которые помогут Вам понять, в чем причина и кто мог быть Заказчиком. В каждом втором случае мы устанавливаем конечного Заказчика. В одном из трех случаев нам с точностью удается установить и Исполнителя, и Заказчика. В одном из десяти случаев собрать доказательную базу 📁')
-        await AuthState.price.set()
-        await state.update_data(price=30000)
-        await AuthState.next()
-        await message.answer('Оплата осуществляется через авторизованный сервис Робокасса, являющийся одним из ведущих в РФ, что гарантирует безопасность платежей ⚒')
-        await message.answer('Введите номер телефона ☎️ привязанный к выбранному аккаунту')
-
-
-@dp.callback_query_handler(text_contains='choise250')
-async def del_keywords(call: CallbackQuery, state: FSMContext):
-    await call.answer(cache_time=60)
-    await AuthState.price.set()
-    await call.message.answer('Введите номер телефона ☎️ привязанный к выбранному аккаунту')
-    await state.update_data(price=250)
-    await AuthState.next()
-
-
-@dp.callback_query_handler(text_contains='choise800')
-async def del_keywords(call: CallbackQuery, state: FSMContext):
-    await call.answer(cache_time=60)
-    await AuthState.price.set()
-    await call.message.answer('Введите номер телефона ☎️ привязанный к выбранному аккаунту')
-    await state.update_data(price=800)
-    await AuthState.next()
-
-
-@dp.callback_query_handler(text_contains='choise4500')
-async def del_keywords(call: CallbackQuery, state: FSMContext):
-    await call.answer(cache_time=60)
-    await AuthState.price.set()
-    await call.message.answer('Введите номер телефона ☎️ привязанный к выбранному аккаунту')
-    await state.update_data(price=4500)
-    await AuthState.next()
+@dp.callback_query_handler(Text(startswith="plan:"), state=AuthState.plan)
+async def select_plan(call: CallbackQuery, state: FSMContext):
+    await call.answer(cache_time=5)
+    data = await state.get_data()
+    service = get_service_by_code(data["service_code"])
+    plan_code = call.data.split(":", 1)[1]
+    plan = get_plan_by_code(service, plan_code)
+    if not plan:
+        await call.message.answer("Не удалось определить тариф. Пожалуйста, выберите вариант из списка.")
+        return
+    await call.message.edit_reply_markup()
+    await prepare_for_phone(call.message, state, service, plan.price, plan)
 
 
 @dp.message_handler(state=AuthState.phone)
 async def get_phone(message: types.Message, state: FSMContext):
-    phone = message.text
-    try:
-        phone = int(phone)
-    except ValueError:
-        await message.answer('Неверный формат номера ⚠')
+    cleaned = PHONE_SANITIZE_PATTERN.sub("", message.text.strip())
+    if cleaned.startswith("+"):
+        digits = cleaned[1:]
+    else:
+        digits = cleaned
+    if not digits.isdigit() or len(digits) < 6:
+        await message.answer("Неверный формат номера ⚠. Пожалуйста, отправьте номер цифрами.")
         return
-    if len(str(phone)) < 6:
-        await message.answer('Неверный формат номера ⚠')
+    normalised = "+" + digits if cleaned.startswith("+") else digits
+    await state.update_data(phone=normalised)
+    await AuthState.email.set()
+    await message.answer(
+        "Оставьте e-mail для связи (или отправьте 'Пропустить').",
+        reply_markup=build_skip_keyboard(),
+    )
+
+
+@dp.message_handler(state=AuthState.email)
+async def get_email(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    if text.lower() in SKIP_WORDS:
+        await state.update_data(email=None)
+    elif EMAIL_PATTERN.match(text):
+        await state.update_data(email=text)
+    else:
+        await message.answer("Похоже, адрес некорректен. Попробуйте снова или отправьте 'Пропустить'.")
         return
-    await state.update_data(phone=phone)
-    telegram_id = int(message.from_user.id)
+    await AuthState.comment.set()
+    await message.answer(
+        "Если есть дополнительные сведения, напишите их (или отправьте 'Пропустить').",
+        reply_markup=build_skip_keyboard(),
+    )
+
+
+@dp.message_handler(state=AuthState.comment)
+async def get_comment(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    if text.lower() in SKIP_WORDS:
+        await state.update_data(comment=None)
+    else:
+        await state.update_data(comment=text)
+    await send_confirmation(message, state)
+
+
+async def send_confirmation(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
-    data.setdefault('telegram_id', telegram_id)
-    for key, value in data.items():
-        dic[telegram_id].setdefault(key, value)
-    link = await make_link(dic[telegram_id])
+    service = get_service_by_code(data["service_code"])
+    summary_lines = [
+        "Проверьте, пожалуйста, данные заявки:",
+        f"• Социальная сеть: {data.get('social_net')}",
+        f"• Ссылка/логин: {data.get('link')}",
+        f"• Услуга: {service.label}",
+        f"• Стоимость: {format_price(data.get('price'))} руб.",
+        f"• Телефон: {data.get('phone')}",
+    ]
+    if data.get("subscription_plan"):
+        summary_lines.insert(4, f"• Тариф: {data['subscription_plan']}")
+    if data.get("email"):
+        summary_lines.append(f"• Email: {data['email']}")
+    if data.get("comment"):
+        summary_lines.append(f"• Комментарий: {data['comment']}")
+    await AuthState.confirmation.set()
+    await message.answer(
+        "\n".join(summary_lines),
+        reply_markup=build_confirmation_keyboard(),
+    )
+
+
+@dp.callback_query_handler(Text(equals="confirm_request"), state=AuthState.confirmation)
+async def confirm_request(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    data = await state.get_data()
+    telegram_id = call.from_user.id
+    data.setdefault("telegram_id", telegram_id)
+    data.setdefault("username", call.from_user.full_name)
+    payment_link = await make_link(data)
+    await state.update_data(payment_link=payment_link)
+    await call.message.edit_reply_markup()
+    await call.message.answer(
+        "Вы можете оплатить заказ через Робокассу по ссылке ниже:",
+        reply_markup=build_payment_keyboard(payment_link),
+    )
+    await call.message.answer(
+        "Отчет о работе будет направлен в этот Telegram. Также доступен договор и реквизиты:",
+        reply_markup=build_contract_keyboard(),
+    )
+    email_sent = await post_data_to_email(await state.get_data())
+    if email_sent:
+        await call.message.answer("Заявка отправлена. Мы свяжемся с Вами в ближайшее время!")
+    else:
+        await call.message.answer(
+            "Не удалось автоматически отправить уведомление по e-mail. Мы проверим заявку вручную."
+        )
     await state.finish()
-    button_link = InlineKeyboardMarkup(row_width=3).add(InlineKeyboardButton('Оплатить через Робокассу ', url=link))
-    await message.answer('Вы можете осуществить оплату через авторизованный сервис Телеграмм (выше) или через внешний сервис Робокасса, один из ведущих в РФ 💳', reply_markup=button_link)
-    button_recv = InlineKeyboardMarkup(row_width=3).add(InlineKeyboardButton('Договор, реквизиты ', url='https://infsectest.ru/docs/offer.pdf'))
-    await message.answer('Отчет о проведенной работе будет направлен Вам в телеграмм, с которого осуществлялся заказ 📋\n\n Отправляем Вам также ссылку на договор оказания услуг, где Вы сможете ознакомиться с гарантиями и обязательствами Российского юридического лица, существующего более 15 лет на рынке. Там же Вы найдете наши официальные реквизиты 👇', reply_markup=button_recv)
-    responce = await post_data_to_email(dic[telegram_id])
-    dic.pop(telegram_id)
 
 
+@dp.callback_query_handler(Text(equals="cancel_request"), state=AuthState.confirmation)
+async def cancel_request(call: CallbackQuery, state: FSMContext):
+    await call.answer("Заявка отменена")
+    await call.message.edit_reply_markup()
+    await state.finish()
+    await call.message.answer("Заявка отменена. Используйте /start, чтобы начать заново.")
