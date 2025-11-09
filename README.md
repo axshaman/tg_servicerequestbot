@@ -1,143 +1,119 @@
-# Telegram Bot for Service Requests and Payments
+# IST-detector Service Request Bot
 
-## Overview
+A Telegram bot built with [aiogram](https://docs.aiogram.dev) that helps clients request cybersecurity services, pay through Robokassa and notify operators by e-mail. The conversation now guides users through choosing a social network, selecting a service or monitoring plan, capturing contact details and confirming their request before payment.
 
-This project is a Telegram bot designed to collect service requests from users and direct them to a payment gateway. The bot offers various cybersecurity-related services, such as security risk analysis, monitoring, and account breach investigations.
+## Features
+
+- Guided dialogue with validation for social network, service and contact details.
+- Support for monitoring subscription plans with inline keyboards.
+- Optional e-mail and comment collection prior to confirmation.
+- Payment link generation for Robokassa with configurable merchant credentials.
+- Automatic e-mail notifications to one or many recipients.
+- `/help`, `/services` and `/cancel` commands for better usability.
+- Docker image based on Python 3.11 for production deployments.
 
 ## Project Structure
 
 ```
-📂 project-root
-│── 📄 Dockerfile               # Configuration for Docker container
-│── 📄 docker-compose.yml        # Docker Compose configuration
-│── 📄 req.txt                   # Dependencies
-│── 📄 main.py                    # Main script to run the bot
-│── 📄 loader.py                  # Bot initialization
-│── 📄 middleware.py               # Middleware setup
-│── 📄 config.py                   # Configuration file for environment variables
-│── 📄 README.md                   # Documentation file
-│── 📂 handlers                    # Folder for bot handlers
-│   │── 📂 images                  # Folder for images
-│   │── 📄 __init__.py             # Init file for handlers module
-│   │── 📄 api_queries.py          # API request handling
-│   │── 📄 services.py             # Bot services logic
-│   │── 📄 states.py               # Bot state management
-│── 📂 keyboards                   # Folder for bot keyboards
-│   │── 📄 __init__.py             # Init file for keyboards module
-│   │── 📄 choise_buttons.py       # Keyboard buttons configuration
-│── 📄 .env                        # Environment variables (not included in repo for security)
-│── 📄 .env.example                # Example of environment configuration
-│── 📄 .gitignore                  # Git ignore file
+📂 tg_servicerequestbot
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── main.py
+├── loader.py
+├── config.py
+├── middleware.py
+├── service_catalog.py
+├── handlers/
+│   ├── __init__.py
+│   ├── services.py
+│   ├── states.py
+│   └── images/
+├── keyboards/
+│   ├── __init__.py
+│   └── choise_buttons.py
+├── docs/
+│   ├── architecture.md
+│   └── openapi.yaml
+└── README.md
 ```
 
-## Dependencies
+## Prerequisites
 
-The bot is built using the `aiogram` library for Telegram bot integration. All required dependencies are listed in `req.txt`:
-
-```
-aiogram==2.13
-aiohttp==3.7.4.post0
-alembic==1.6.5
-...
-python-dotenv==0.17.1
-requests==2.24.0
-```
-
-To install dependencies, run:
-
-```sh
-pip install -r req.txt
-```
+- Python 3.11+
+- A Telegram bot token (`@BotFather`)
+- Access to an SMTP server for outbound notifications
+- Robokassa merchant credentials (login and password #1)
 
 ## Configuration
 
-Before running the bot, set up the `.env` file with the following variables:
+Create a `.env` file in the project root (see `.gitignore`). Supported variables:
 
 ```
-TOKEN=your-telegram-bot-token
-email_password=your-email-password
-HOST=email-server-host
-EMAIL_FROM=your-email-address
-EMAIL_TO_1=recipient-email
-EMAIL_TO_2=recipient-email
-EMAIL_TO_3=recipient-email
-EMAIL_TO_4=recipient-email
+TOKEN=<telegram bot token>
+EMAIL_PASSWORD=<smtp password>
+HOST=<smtp host>
+EMAIL_FROM=<sender address>
+EMAIL_TO=<comma separated recipient list>
+EMAIL_TO_1=<legacy recipient, optional>
+EMAIL_TO_2=<legacy recipient, optional>
+EMAIL_TO_3=<legacy recipient, optional>
+EMAIL_TO_4=<legacy recipient, optional>
+ROBOKASSA_MERCHANT_LOGIN=<defaults to infsectest_ru>
+ROBOKASSA_PASSWORD1=<defaults to qNI1cl89rPWbFMkb9Ls0>
+ROBOKASSA_BASE_URL=<defaults to https://auth.robokassa.ru/Merchant/Index.aspx>
+PAYMENT_DESCRIPTION_TEMPLATE=<custom description pattern>
 ```
 
-## Running the Bot
+> **Tip:** `EMAIL_TO` can be used to define all recipients in a single comma-separated value, while the numbered variables keep compatibility with older deployments.
 
-1. Install dependencies:
+## Installation
 
-    ```sh
-    pip install -r req.txt
-    ```
-
-2. Run the bot:
-
-    ```sh
-    python main.py
-    ```
-
-## Running with Docker
-
-To deploy the bot using Docker:
-
-1. Build and run the container:
-
-    ```sh
-    docker-compose up --build -d
-    ```
-
-2. Check logs:
-
-    ```sh
-    docker-compose logs -f
-    ```
-
-The bot runs inside a container using the configuration specified in `docker-compose.yml`:
-
-```yaml
-version: "3.1"
-services:
-  infsectest_bot:
-    container_name: infsectest_bot
-    build:
-      context: .
-    command: python main.py
-    restart: always
-    volumes:
-      - .:/src
-    env_file:
-      - '.env'
-    networks: 
-      - infsectest_botnet
-
-networks: 
-  infsectest_botnet:
-    driver: bridge
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-## Usage
+Run the bot locally:
 
-1. Start the bot by running `/start`.
-2. Select the desired service.
-3. Provide necessary details (e.g., account ID, phone number).
-4. Click on the provided payment link.
-5. After payment, the bot will process the request and send a report.
+```bash
+python main.py
+```
 
-## Features
+## Docker Usage
 
-- Secure payment integration with **Robokassa**.
-- Provides cybersecurity-related services.
-- Saves request details and sends them via email.
-- Supports multiple recipients for email notifications.
-- Uses **Docker** for easy deployment.
+Build and run with Docker Compose:
+
+```bash
+docker-compose up --build -d
+```
+
+Follow logs:
+
+```bash
+docker-compose logs -f
+```
+
+## Bot Commands
+
+- `/start` – begin a new service request flow.
+- `/services` – display the list of available services and monitoring plans.
+- `/help` – show quick usage hints.
+- `/cancel` – abort the current conversation and reset the state.
+
+## Documentation
+
+Additional documentation is located in the [`docs/`](docs) directory:
+
+- [`openapi.yaml`](docs/openapi.yaml) – OpenAPI 3.0 description of the service-request workflow for integration scenarios.
+- [`architecture.md`](docs/architecture.md) – C4 model overview (context, container and component views) of the bot solution.
+
+## Testing
+
+The project currently relies on manual testing via Telegram. When running locally, interact with the bot using the provided commands to verify the flow, payment link generation and e-mail delivery.
 
 ## License
 
-This project is licensed under the MIT License.
-
----
-
-For further development or integration, refer to the source code in `services.py`, `api_queries.py`, and `choise_buttons.py`.
-
+This project is distributed under the MIT License.

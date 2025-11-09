@@ -2,25 +2,17 @@ version: "3.1"
 services:
   infsectest_bot:
     container_name: infsectest_bot
-
     build:
-        context: .
-
+      context: .
     command: python main.py
     restart: always
     volumes:
-        - .:/src
+      - .:/app
     env_file:
-        - '.env'
-    networks: 
-        - infsectest_botnet
+      - '.env'
+    networks:
+      - infsectest_botnet
 
-networks: 
-    infsectest_botnet:
-        driver: bridge
-
-
-
-         
-
-        
+networks:
+  infsectest_botnet:
+    driver: bridge

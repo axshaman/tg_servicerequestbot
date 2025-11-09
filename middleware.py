@@ -1,1 +1,2 @@
-from aiogram.contrib.middlewares.i18n import I18nMiddleware
+"""Custom middlewares placeholder."""
+# Middlewares can be registered here when multilingual support is required.
